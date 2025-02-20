@@ -50,7 +50,30 @@ def main(args: argparse.Namespace) -> dict[str, float]:
     dev = torch.utils.data.DataLoader(Dataset(mnist.dev), batch_size=args.batch_size)
 
     # Create the model.
-    model = torch.nn.Sequential()
+    activation_functions = {
+        'none': lambda: torch.nn.Identity(),  
+        'relu': torch.nn.ReLU,
+        'tanh': torch.nn.Tanh,
+        'sigmoid': torch.nn.Sigmoid,
+    }
+
+    input_size = MNIST.C * MNIST.H * MNIST.W
+
+    layers = [torch.nn.Flatten()]  
+
+    # Add hidden layers
+    if args.hidden_layers > 0:
+        for _ in range(args.hidden_layers):
+            layers.append(torch.nn.Linear(input_size, args.hidden_layer_size))  # Connect the previous layer to the current one
+            layers.append(activation_functions[args.activation]())  # Add activation
+            input_size = args.hidden_layer_size 
+    
+        layers.append(torch.nn.Linear(args.hidden_layer_size, MNIST.LABELS))
+    else:
+        layers.append(torch.nn.Linear(784, MNIST.LABELS))
+
+    # Create the final model
+    model = torch.nn.Sequential(*layers)
 
     # TODO: Finish the model. Namely:
     # - start by adding the `torch.nn.Flatten()` layer;
