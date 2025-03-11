@@ -39,8 +39,9 @@ class Model(torch.nn.Module):
         # - _W2, which is a parameter of size `[args.hidden_layer, MNIST.LABELS]`,
         #   initialized to `torch.randn` value with standard deviation 0.1,
         # - _b2, which is a parameter of size `[MNIST.LABELS]` initialized to zeros.
-        self._W2 = ...
-        self._b2 = ...
+        self._W2 = torch.nn.Parameter(torch.randn(args.hidden_layer, MNIST.LABELS) * 0.1)
+        # self._b2 = torch.nn.parameter(torch.zeros(MNIST.LABELS)) # Capital letter P is causing module error
+        self._b2 = torch.nn.Parameter(torch.zeros(MNIST.LABELS))
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
         # TODO: Define the computation of the network. Notably:
@@ -52,11 +53,15 @@ class Model(torch.nn.Module):
         # - then multiply it by `self._W1` and then add `self._b1`,
         # - apply `torch.tanh`,
         # - finally, multiply the result by `self._W2` and then add `self._b2`.
-        return ...
+        inputs = (inputs.to(torch.float32)/255)
+        inputs = inputs.reshape(inputs.shape[0], -1)
+        inputs = torch.tanh(torch.matmul(inputs, self._W1) + self._b1) # hidden layers
+        inputs = torch.matmul(inputs, self._W2) + self._b2
+        return inputs
 
     def train_epoch(self, dataset: MNIST.Dataset) -> None:
         self.train()
-        for batch in dataset.batches(self._args.batch_size, shuffle=True):
+        for batch in dataset.batches(self._args.batch_size):
             # The batch contains
             # - batch["images"] with shape [?, MNIST.C, MNIST.H, MNIST.W]
             # - batch["labels"] with shape [?]
@@ -67,14 +72,14 @@ class Model(torch.nn.Module):
             # This is needed, because the data is currently on CPU, but the model might
             # be on a GPU. You can move the data using the `.to(device)` method, and you
             # can obtain the device of the model using for example `self._W1.device`.
-            images = batch["images"].to(...)
-            labels = batch["labels"].to(...)
+            images = batch["images"].to(self._W1.device)
+            labels = batch["labels"].to(self._W1.device)
 
             # TODO: Compute the predicted logits of the batch images by calling `self(...)`.
-            logits = ...
+            logits = self(images)
 
             # TODO: Compute the probabilities of the batch images using `torch.softmax`.
-            probabilities = ...
+            probabilities = torch.softmax(logits, dim=1)
 
             # TODO: Manually compute the loss:
             # - For every batch example, the loss is the categorical crossentropy of the
@@ -85,7 +90,9 @@ class Model(torch.nn.Module):
             #     by suitably indexing the predicted probabilities by the gold labels.
             #   Note that it might be necessary to convert the labels from bytes to `torch.int64`.
             # - Finally, compute the average across the batch examples.
-            loss = ...
+            g_label = torch.nn.functional.one_hot(labels.to(torch.int64), num_classes=probabilities.shape[1])
+            # log_prob = torch.log(probabilities)
+            loss = -torch.log((probabilities * g_label).sum(dim=1)).mean()
 
             # We create a list of all parameters. Note that a `torch.nn.Module` automatically
             # tracks owned parameters, so we could also use `list(self.parameters())`.
@@ -95,7 +102,8 @@ class Model(torch.nn.Module):
             # the backpropagation algorithm, by
             # - first resetting the gradients of all parameters to zero with `self.zero_grad()`,
             # - then calling `loss.backward()`.
-            ...
+            self.zero_grad()
+            loss.backward()
 
             gradients = [parameter.grad for parameter in parameters]
             with torch.no_grad():
@@ -103,7 +111,8 @@ class Model(torch.nn.Module):
                     # TODO: Perform the SGD update with learning rate `self._args.learning_rate`
                     # for the parameter and computed gradient. You can modify the
                     # parameter value directly with `-=`, or you can use `parameter.sub_`.
-                    ...
+                    parameter.sub_(self._args.learning_rate * gradient)
+
 
     def evaluate(self, dataset: MNIST.Dataset) -> float:
         self.eval()
@@ -113,12 +122,17 @@ class Model(torch.nn.Module):
             for batch in dataset.batches(self._args.batch_size):
                 # TODO: Compute the logits of the batch images as in the training,
                 # and then convert them to Numpy with `.numpy(force=True)`.
-                logits = ...
+                images = batch["images"].to(self._W1.device)
+                labels = batch["labels"].to(self._W1.device)
+                logits = self(images)
+                # logits_np = logits.numpy(force=True)
+
 
                 # TODO: Evaluate how many batch examples were predicted
                 # correctly and increase `correct` variable accordingly, assuming
                 # the model predicts the class with the highest logit/probability.
-                correct += ...
+                pred = torch.argmax(logits, dim=1)
+                correct += torch.sum(pred == labels).item()
 
         return correct / len(dataset)
 
@@ -154,15 +168,15 @@ def main(args: argparse.Namespace) -> tuple[float, float]:
 
     for epoch in range(args.epochs):
         # TODO: Run the `train_epoch` with `mnist.train` dataset
-        ...
+        model.train_epoch(mnist.train)
 
         # TODO: Evaluate the dev data using `evaluate` on `mnist.dev` dataset
-        dev_accuracy = ...
+        dev_accuracy = model.evaluate(mnist.dev)
         print("Dev accuracy after epoch {} is {:.2f}".format(epoch + 1, 100 * dev_accuracy), flush=True)
         writer.add_scalar("dev/accuracy", 100 * dev_accuracy, epoch + 1)
 
     # TODO: Evaluate the test data using `evaluate` on `mnist.test` dataset
-    test_accuracy = ...
+    test_accuracy = model.evaluate(mnist.test)
     print("Test accuracy after epoch {} is {:.2f}".format(epoch + 1, 100 * test_accuracy), flush=True)
     writer.add_scalar("test/accuracy", 100 * test_accuracy, epoch + 1)
 

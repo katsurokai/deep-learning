@@ -47,12 +47,17 @@ def main(args: argparse.Namespace) -> None:
     test = torch.utils.data.DataLoader(Dataset(mnist.test), batch_size=args.batch_size)
 
     # Create the model.
-    model = torch.nn.Sequential(
-        torch.nn.Flatten(),
-        torch.nn.Linear(MNIST.C * MNIST.H * MNIST.W, args.hidden_layer_size),
-        torch.nn.ReLU(),
-        torch.nn.Linear(args.hidden_layer_size, MNIST.LABELS),
-    )
+    layers = [torch.nn.Flatten()]
+    # layers.append(torch.nn.Linear(MNIST.C * MNIST.H * MNIST.W, args.hidden_layer_size),)
+    # layers.append(torch.nn.ReLU())
+    layers.append(torch.nn.Linear(784 , MNIST.LABELS))
+    model = torch.nn.Sequential(*layers)
+    # model = torch.nn.Sequential(
+    #     torch.nn.Flatten(),
+    #     torch.nn.Linear(MNIST.C * MNIST.H * MNIST.W, args.hidden_layer_size),
+    #     torch.nn.ReLU(),
+    #     torch.nn.Linear(args.hidden_layer_size, MNIST.LABELS),
+    # )
     print("The following model has been created:", model)
 
     # Create the TrainableModule and configure it for training.
@@ -64,7 +69,7 @@ def main(args: argparse.Namespace) -> None:
         metrics={"accuracy": torchmetrics.Accuracy("multiclass", num_classes=MNIST.LABELS)},
         logdir=args.logdir,
     )
-    model.get_tb_writer("train").add_graph(model, torch.zeros(1, MNIST.C, MNIST.H, MNIST.W, device=model.device))
+    model.get_tb_writer("train").add_graph(model, next(iter(train))[0].to(model.device))
 
     # Train the model.
     model.fit(train, dev=dev, epochs=args.epochs)

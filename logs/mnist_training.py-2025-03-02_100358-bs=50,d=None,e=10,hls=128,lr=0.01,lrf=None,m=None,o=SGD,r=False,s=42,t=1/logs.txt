@@ -1,0 +1,10 @@
+Epoch 1/10 3.2s train_loss=0.8300 train_accuracy=0.7960 dev_loss=0.3780 dev_accuracy=0.9062
+Epoch 2/10 2.9s train_loss=0.4088 train_accuracy=0.8892 dev_loss=0.2940 dev_accuracy=0.9208
+Epoch 3/10 3.0s train_loss=0.3473 train_accuracy=0.9030 dev_loss=0.2585 dev_accuracy=0.9284
+Epoch 4/10 3.0s train_loss=0.3144 train_accuracy=0.9116 dev_loss=0.2383 dev_accuracy=0.9352
+Epoch 5/10 3.0s train_loss=0.2911 train_accuracy=0.9184 dev_loss=0.2230 dev_accuracy=0.9400
+Epoch 6/10 3.0s train_loss=0.2729 train_accuracy=0.9235 dev_loss=0.2092 dev_accuracy=0.9430
+Epoch 7/10 3.2s train_loss=0.2576 train_accuracy=0.9281 dev_loss=0.1992 dev_accuracy=0.9480
+Epoch 8/10 3.4s train_loss=0.2441 train_accuracy=0.9317 dev_loss=0.1902 dev_accuracy=0.9512
+Epoch 9/10 3.1s train_loss=0.2326 train_accuracy=0.9351 dev_loss=0.1828 dev_accuracy=0.9544
+Epoch 10/10 4.3s train_loss=0.2221 train_accuracy=0.9379 dev_loss=0.1743 dev_accuracy=0.9546

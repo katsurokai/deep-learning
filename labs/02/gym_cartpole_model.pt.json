@@ -1,0 +1,14 @@
+{
+  "args : argparse.Namespace": {
+    "evaluate": false,
+    "recodex": false,
+    "render": false,
+    "seed": 42,
+    "threads": 1,
+    "batch_size": 10,
+    "epochs": 1000,
+    "learning_rate": 0.001,
+    "model": "gym_cartpole_model.pt",
+    "logdir": "logs/gym_cartpole.py-2025-03-02_115038-bs=10,e=1000,e=False,lr=0.001,m=gym_cartpole_model.pt,r=False,r=False,s=42,t=1"
+  }
+}

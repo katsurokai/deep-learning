@@ -6,6 +6,7 @@ import re
 
 import numpy as np
 import torch
+import torch.optim.adadelta
 import torchmetrics
 
 import npfl138
@@ -20,8 +21,9 @@ parser.add_argument("--render", default=False, action="store_true", help="Render
 parser.add_argument("--seed", default=42, type=int, help="Random seed.")
 parser.add_argument("--threads", default=1, type=int, help="Maximum number of threads to use.")
 # If you add more arguments, ReCodEx will keep them with your default values.
-parser.add_argument("--batch_size", default=..., type=int, help="Batch size.")
-parser.add_argument("--epochs", default=..., type=int, help="Number of epochs.")
+parser.add_argument("--batch_size", default=10, type=int, help="Batch size.")
+parser.add_argument("--epochs", default=1000, type=int, help="Number of epochs.")
+parser.add_argument("--learning_rate", default=0.001, type=float, help="Learning rate.")
 parser.add_argument("--model", default="gym_cartpole_model.pt", type=str, help="Output model path.")
 
 
@@ -64,12 +66,17 @@ class Model(npfl138.TrainableModule):
         # TODO: Create the model layers, with the last layer having 2 outputs.
         # To store a list of layers, you can use either `torch.nn.Sequential`
         # or `torch.nn.ModuleList`; you should *not* use a Python list.
-        ...
+        self.model = torch.nn.Sequential(
+            torch.nn.Linear(GymCartpoleDataset.FEATURES, 4),
+            torch.nn.ReLU(),
+            torch.nn.Linear(4, 2)
+        )
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
         # TODO: Run your model. Because some inputs are on a CPU, you should
-        # start by moving them to the `self.device`.
-        ...
+        # start by moving them to the `model.device`.
+        inputs = inputs.to(self.device)
+        return self.model(inputs)
 
 
 def main(args: argparse.Namespace) -> torch.nn.Module | None:
@@ -101,13 +108,43 @@ def main(args: argparse.Namespace) -> torch.nn.Module | None:
         model = Model(args)
 
         # TODO: Configure the model for training.
-        model.configure(...)
+
+
+        # ---------------------------------- #
+        optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate)
+        loss_fn = torch.nn.CrossEntropyLoss()
+
+        for epoch in range(args.epochs):
+            model.train()
+            t_loss = 0
+            for inputs, labels in train:
+                inputs, labels = inputs.to(model.device), labels.to(model.device)
+                optimizer.zero_grad()
+                outputs = model(inputs)
+                loss = loss_fn(outputs, labels)
+                loss.backward()
+                optimizer.step()
+                t_loss += loss.item()
+            # print(f"Epoch {epoch + 1}/{args.epochs}, Loss: {t_loss / len(train)}")
+        # --------------------------------
+ 
+        # model.configure(
+        #     # optimizer=torch.optim.Adam(model.parameters()),
+        #     # loss = torch.nn.CrossEntropyLoss(),
+        #     # metrics = {"accuracy": torchmetrics.Accuracy(task="multiclass", num_classes=2)},
+        #     # logdir=args.logdir
+        #     torch.optim.Adam(model.parameters(), lr=0.001)
+        # )
+
+        # loss_fn = torch.nn.CrossEntropyLoss()
+
+        
 
         # TODO: Train the model. Note that you can pass a list of callbacks to the
         # `fit` method, each being a callable accepting the model, epoch, and logs.
         # Such callbacks are called after every epoch and if they modify the
         # logs dictionary, the values are logged on the console and to TensorBoard.
-        model.fit(train, epochs=args.epochs, callbacks=[])
+        # model.fit(train, epochs=args.epochs, callbacks=[])
 
         # Save the model, both the hyperparameters and the parameters. If you
         # added additional arguments to the `Model` constructor beyond `args`,

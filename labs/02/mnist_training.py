@@ -73,7 +73,7 @@ def main(args: argparse.Namespace) -> dict[str, float]:
     #   each batch, so the number of scheduler iterations is the number of batches in all
     #   training epochs (note that `len(train)` is the number of batches in one epoch).
     #   - for `linear`, use `torch.optim.lr_scheduler.LinearLR` and set `start_factor`,
-    #     `end_factor`, and `total_iters` appropriately;
+    #     `end_factor`, and `total_steps` appropriately;
     #   - for `exponential`, use `torch.optim.lr_scheduler.ExponentialLR` and set `gamma`
     #     appropriately (be careful to compute it using float64 to avoid precision issues);
     #   - for `cosine`, use `torch.optim.lr_scheduler.CosineAnnealingLR` and set `T_max`
@@ -84,11 +84,31 @@ def main(args: argparse.Namespace) -> dict[str, float]:
     #   learning rate to the console and to TensorBoard. Additionally, you can find out
     #   the next learning rate to be used by printing `model.scheduler.get_last_lr()[0]`.
     #   Therefore, after the training, this value should be `args.learning_rate_final`.
-    ...
+    
+    if args.optimizer == "SGD":
+        if args.momentum:
+            optim = torch.optim.SGD(model.parameters(), lr=args.learning_rate, momentum=args.momentum, nesterov=True)
+        else:
+            optim = torch.optim.SGD(model.parameters(), lr=args.learning_rate)
+    elif args.optimizer == "Adam":
+        optim = torch.optim.Adam(model.parameters(), lr=args.learning_rate)
+
+    scheduler = None
+    if args.decay:
+        t_steps = args.epochs * len(train)
+        if args.decay == "linear":
+            s_factor = 1.0
+            e_factor = args.learning_rate_final / args.learning_rate
+            scheduler = torch.optim.lr_scheduler.LinearLR(optimizer=optim, start_factor=s_factor, end_factor=e_factor, total_iters=t_steps)
+        elif args.decay == "exponential":
+            gamma = (float(args.learning_rate_final) / float(args.learning_rate)) **  (1.0 / t_steps)
+            scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer=optim, gamma=gamma)
+        elif args.decay == "cosine":
+            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optim, T_max=t_steps, eta_min=args.learning_rate_final)
 
     model.configure(
-        optimizer=...,
-        scheduler=...,
+        optimizer=optim,
+        scheduler=scheduler,
         loss=torch.nn.CrossEntropyLoss(),
         metrics={"accuracy": torchmetrics.Accuracy("multiclass", num_classes=MNIST.LABELS)},
         logdir=args.logdir,
