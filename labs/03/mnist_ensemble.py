@@ -3,6 +3,7 @@ import argparse
 
 import torch
 import torchmetrics
+import numpy as np
 
 import npfl138
 npfl138.require_version("2425.3")
@@ -62,7 +63,9 @@ def main(args: argparse.Namespace) -> tuple[list[float], list[float]]:
     individual_accuracies, ensemble_accuracies = [], []
     for model in range(args.models):
         # TODO: Compute the accuracy on the dev set for the individual `models[model]`.
-        individual_accuracy = ...
+        # eval_result = models[model].evaluate(dev)
+        # print(eval_result)
+        individual_accuracy = models[model].evaluate(dev)["test_accuracy"]
 
         # TODO: Compute the accuracy on the dev set for the ensemble `models[0:model+1]`.
         #
@@ -76,7 +79,31 @@ def main(args: argparse.Namespace) -> tuple[list[float], list[float]]:
         #    on the `dev` dataloader (with `data_with_labels=True` to indicate the dataloader
         #    also contains the labels) and average the predicted distributions. To measure
         #    accuracy, either do it completely manually or use `torchmetrics.Accuracy`.
-        ensemble_accuracy = ...
+        
+        # choose option 2
+        all_predictions = []
+        targets = []
+        
+        for batch in dev:
+            inputs, labels = batch
+
+            # Convert predictions to tensors properly for models in the current ensemble
+            model_predictions = [torch.tensor(np.array(m.predict(inputs)), dtype=torch.float32) for m in models[:model + 1]]
+
+            # Stack predictions and apply softmax to get probabilities
+            predictions = torch.stack([torch.softmax(pred, dim=1) for pred in model_predictions], dim=0)
+            ensemble_prediction = predictions.mean(dim=0)  # Average over models
+
+            all_predictions.append(ensemble_prediction.argmax(dim=1))
+            targets.append(labels)
+
+        # Concatenate the lists into single tensors
+        all_predictions = torch.cat(all_predictions)
+        targets = torch.cat(targets)
+
+        accuracy_metric = torchmetrics.Accuracy("multiclass", num_classes=MNIST.LABELS)
+        ensemble_accuracy = accuracy_metric(all_predictions, targets).item()
+
 
         # Store the accuracies
         individual_accuracies.append(individual_accuracy)
