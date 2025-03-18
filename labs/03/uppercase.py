@@ -174,19 +174,11 @@ def main(args: argparse.Namespace) -> None:
     # as input, capitalize suitable characters, and write the result to `predictions_file`
     # (which is by default `uppercase_test.txt` in the `args.logdir` directory).
     os.makedirs(args.logdir, exist_ok=True)
-<<<<<<< HEAD
-    with open(os.path.join(args.logdir, "uppercase_test.txt"), "w", encoding="utf-8") as predictions_file:
-        # Get the test set predictions; if you modified the `test` dataloader or your model
-        # does not process the dataset windows, you might need to adjust the following line.
-        predictions = model.predict(test, data_with_labels=True)
-        ...
-=======
+
     predictions_path = os.path.join(args.logdir, "uppercase_test.txt")
     with open(predictions_path, "w", encoding="utf-8") as predictions_file:
         predictions_file.write(result_text)
     print(f"Predictions written to {predictions_path}")
->>>>>>> fe62c8e (Lab 03)
-
 
 if __name__ == "__main__":
     main_args = parser.parse_args([] if "__file__" not in globals() else None)
