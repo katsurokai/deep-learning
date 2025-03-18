@@ -5,33 +5,26 @@ import os
 import re
 
 import torch
-import torchmetrics
+import torch.nn.functional as F
 
 import npfl138
 npfl138.require_version("2425.3.1")
 from npfl138.datasets.uppercase_data import UppercaseData
 
-# TODO: Set reasonable values for the hyperparameters, especially for
-# `alphabet_size`, `batch_size`, `epochs`, and `window`.
-# Also, you can set the number of threads to 0 to use all your CPU cores.
+# Set reasonable default hyperparameters.
 parser = argparse.ArgumentParser()
 parser.add_argument("--alphabet_size", default=100, type=int, help="If given, use this many most frequent chars.")
-parser.add_argument("--batch_size", default=10000, type=int, help="Batch size.")
-parser.add_argument("--epochs", default=40, type=int, help="Number of epochs.")
+parser.add_argument("--batch_size", default=32, type=int, help="Batch size.")
+parser.add_argument("--epochs", default=10, type=int, help="Number of epochs.")
 parser.add_argument("--seed", default=42, type=int, help="Random seed.")
-parser.add_argument("--threads", default=0, type=int, help="Maximum number of threads to use.")
-parser.add_argument("--window", default=7, type=int, help="Window size to use.")
+parser.add_argument("--threads", default=0, type=int, help="Maximum number of threads to use (0 means all cores).")
+parser.add_argument("--window", default=3, type=int, help="Window size to use (number of characters to the left/right).")
 
 
 class BatchGenerator:
     """A simple batch generator, optionally with shuffling.
 
-    The functionality of this batch generator is very similar to
-        torch.utils.data.DataLoader(
-            torch.utils.data.StackDataset(inputs, outputs),
-            batch_size=batch_size, shuffle=shuffle,
-        )
-    but if the data is stored in a single tensor, it is much faster.
+    Similar in functionality to torch.utils.data.DataLoader for datasets stored as tensors.
     """
     def __init__(self, inputs: torch.Tensor, outputs: torch.Tensor, batch_size: int, shuffle: bool):
         self._inputs = inputs.to(device="cuda")
@@ -54,36 +47,23 @@ class Model(npfl138.TrainableModule):
     def __init__(self, args: argparse.Namespace):
         super().__init__()
         self._args = args
-
-        # TODO: Implement a suitable model. The inputs are _windows_ of fixed size
-        # (`args.window` characters on the left, the character in question, and
-        # `args.window` characters on the right), where each character is
-        # represented by a `torch.int64` index. To suitably represent the
-        # characters, you can:
-        # - Convert the character indices into _one-hot encoding_, which you can
-        #   achieve by using `torch.nn.functional.one_hot` on the characters,
-        #   and then concatenate the one-hot encodings of the window characters.
-        # - Alternatively, you can experiment with `torch.nn.Embedding`s (an
-        #   efficient implementation of one-hot encoding followed by a Dense layer)
-        #   and flattening afterwards, or suitably using `torch.nn.EmbeddingBag`.
         # Use an embedding layer to map character indices to embeddings.
         # Note: We assume that the dataset reserves index 0 for padding if needed.
         self.embedding = torch.nn.Embedding(num_embeddings=args.alphabet_size, embedding_dim=16)
         # The input dimension to the classifier is (2*window + 1) * embedding_dim.
         input_dim = (2 * args.window + 1) * 16
-        self.classifier = torch.nn.Sequential(
-            torch.nn.Flatten(),  # Flattens [batch, 2*window+1, 16] -> [batch, (2*window+1)*16]
-            torch.nn.Linear(input_dim, 64),
-            torch.nn.ReLU(),
-            torch.nn.Linear(64, 1)  # Single output for binary classification.
-        )
+        self.fc1 = torch.nn.Linear(input_dim, 64)
+        self.fc2 = torch.nn.Linear(64, 1)  # Single output for binary classification.
+        self.relu = torch.nn.ReLU()
 
     def forward(self, windows: torch.Tensor) -> torch.Tensor:
-        # TODO: Implement the forward pass.
         # windows: [batch_size, 2*window+1] containing character indices.
-        x = self.embedding(windows)
-        x = self.classifier(x)
-        return x  # Returns raw logits. # Raw logits; use BCEWithLogitsLoss during training.
+        x = self.embedding(windows)  # [batch_size, 2*window+1, 16]
+        x = x.view(x.size(0), -1)     # flatten to [batch_size, (2*window+1)*16]
+        x = self.fc1(x)
+        x = self.relu(x)
+        x = self.fc2(x)
+        return x  # Raw logits; use BCEWithLogitsLoss during training.
 
 
 def main(args: argparse.Namespace) -> None:
@@ -98,24 +78,19 @@ def main(args: argparse.Namespace) -> None:
         ",".join(("{}={}".format(re.sub("(.)[^_]*_?", r"\1", k), v) for k, v in sorted(vars(args).items())))
     ))
 
-    # Load the data. The default label dtype of torch.float32 is suitable for binary classification,
-    # but you should change it to torch.int64 if you use 2-class classification (CrossEntropyLoss).
+    # Load the data.
+    # The label_dtype is torch.float32, which is appropriate for binary classification using BCEWithLogitsLoss.
     uppercase_data = UppercaseData(args.window, args.alphabet_size, label_dtype=torch.float32)
 
-    # Instead of using
-    #   train = torch.utils.data.DataLoader(
-    #     torch.utils.data.StackDataset(uppercase_data.train.windows, uppercase_data.train.labels),
-    #     batch_size=args.batch_size, shuffle=True)
-    # we use the BatchGenerator, which is about an order of magnitude faster.
+    # Create batch generators.
     train = BatchGenerator(uppercase_data.train.windows, uppercase_data.train.labels, args.batch_size, shuffle=True)
     dev = BatchGenerator(uppercase_data.dev.windows, uppercase_data.dev.labels, args.batch_size, shuffle=False)
     test = BatchGenerator(uppercase_data.test.windows, uppercase_data.test.labels, args.batch_size, shuffle=False)
 
-    # TODO: Implement a suitable model, optionally including regularization, select
-    # good hyperparameters, and train the model.
+    # Instantiate the model.
     model = Model(args)
     model = model.to(device="cuda")
-    
+
     # Set up the loss function and optimizer.
     loss_fn = torch.nn.BCEWithLogitsLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
@@ -170,22 +145,12 @@ def main(args: argparse.Namespace) -> None:
             result_chars.append(ch)
     result_text = "".join(result_chars)
 
-    # TODO: Generate correctly capitalized test set. Use `uppercase_data.test.text`
-    # as input, capitalize suitable characters, and write the result to `predictions_file`
-    # (which is by default `uppercase_test.txt` in the `args.logdir` directory).
+    # Write the transformed text to predictions file.
     os.makedirs(args.logdir, exist_ok=True)
-<<<<<<< HEAD
-    with open(os.path.join(args.logdir, "uppercase_test.txt"), "w", encoding="utf-8") as predictions_file:
-        # Get the test set predictions; if you modified the `test` dataloader or your model
-        # does not process the dataset windows, you might need to adjust the following line.
-        predictions = model.predict(test, data_with_labels=True)
-        ...
-=======
     predictions_path = os.path.join(args.logdir, "uppercase_test.txt")
     with open(predictions_path, "w", encoding="utf-8") as predictions_file:
         predictions_file.write(result_text)
     print(f"Predictions written to {predictions_path}")
->>>>>>> fe62c8e (Lab 03)
 
 
 if __name__ == "__main__":

@@ -16,15 +16,15 @@ from npfl138.datasets.uppercase_data import UppercaseData
 # Also, you can set the number of threads to 0 to use all your CPU cores.
 parser = argparse.ArgumentParser()
 parser.add_argument("--alphabet_size", default=100, type=int, help="If given, use this many most frequent chars.")
-parser.add_argument("--batch_size", default=10000, type=int, help="Batch size.")
-parser.add_argument("--epochs", default=40, type=int, help="Number of epochs.")
+parser.add_argument("--batch_size", default=10, type=int, help="Batch size.")
+parser.add_argument("--epochs", default=1, type=int, help="Number of epochs.")
 parser.add_argument("--seed", default=42, type=int, help="Random seed.")
 parser.add_argument("--threads", default=0, type=int, help="Maximum number of threads to use.")
-parser.add_argument("--window", default=7, type=int, help="Window size to use.")
+parser.add_argument("--window", default=3, type=int, help="Window size to use.")
 
 
 class BatchGenerator:
-    """A simple batch generator, optionally with shuffling.
+    """A simple batch generator, optionally with suffling.
 
     The functionality of this batch generator is very similar to
         torch.utils.data.DataLoader(
@@ -34,8 +34,8 @@ class BatchGenerator:
     but if the data is stored in a single tensor, it is much faster.
     """
     def __init__(self, inputs: torch.Tensor, outputs: torch.Tensor, batch_size: int, shuffle: bool):
-        self._inputs = inputs.to(device="cuda")
-        self._outputs = outputs.to(device="cuda")
+        self._inputs = inputs
+        self._outputs = outputs
         self._batch_size = batch_size
         self._shuffle = shuffle
 
@@ -43,7 +43,7 @@ class BatchGenerator:
         return (len(self._inputs) + self._batch_size - 1) // self._batch_size
 
     def __iter__(self):
-        indices = torch.randperm(len(self._inputs), device="cuda") if self._shuffle else torch.arange(len(self._inputs), device="cuda")
+        indices = torch.randperm(len(self._inputs)) if self._shuffle else torch.arange(len(self._inputs))
         while len(indices):
             batch = indices[:self._batch_size]
             indices = indices[self._batch_size:]
@@ -71,19 +71,19 @@ class Model(npfl138.TrainableModule):
         self.embedding = torch.nn.Embedding(num_embeddings=args.alphabet_size, embedding_dim=16)
         # The input dimension to the classifier is (2*window + 1) * embedding_dim.
         input_dim = (2 * args.window + 1) * 16
-        self.classifier = torch.nn.Sequential(
-            torch.nn.Flatten(),  # Flattens [batch, 2*window+1, 16] -> [batch, (2*window+1)*16]
-            torch.nn.Linear(input_dim, 64),
-            torch.nn.ReLU(),
-            torch.nn.Linear(64, 1)  # Single output for binary classification.
-        )
+        self.fc1 = torch.nn.Linear(input_dim, 64)
+        self.fc2 = torch.nn.Linear(64, 1)  # Single output for binary classification.
+        self.relu = torch.nn.ReLU()
 
     def forward(self, windows: torch.Tensor) -> torch.Tensor:
         # TODO: Implement the forward pass.
         # windows: [batch_size, 2*window+1] containing character indices.
-        x = self.embedding(windows)
-        x = self.classifier(x)
-        return x  # Returns raw logits. # Raw logits; use BCEWithLogitsLoss during training.
+        x = self.embedding(windows)  # [batch_size, 2*window+1, 16]
+        x = x.view(x.size(0), -1)     # flatten to [batch_size, (2*window+1)*16]
+        x = self.fc1(x)
+        x = self.relu(x)
+        x = self.fc2(x)
+        return x  # Raw logits; use BCEWithLogitsLoss during training.
 
 
 def main(args: argparse.Namespace) -> None:
@@ -114,7 +114,6 @@ def main(args: argparse.Namespace) -> None:
     # TODO: Implement a suitable model, optionally including regularization, select
     # good hyperparameters, and train the model.
     model = Model(args)
-    model = model.to(device="cuda")
     
     # Set up the loss function and optimizer.
     loss_fn = torch.nn.BCEWithLogitsLoss()
@@ -163,7 +162,7 @@ def main(args: argparse.Namespace) -> None:
     # For each character, if the corresponding prediction is 1, output its uppercase version.
     result_chars = []
     # Note: We assume that the number of windows equals the number of characters in the text.
-    for ch, pred in zip(uppercase_data.test.text, all_preds):
+    for ch, pred in zip(uppercase_data.dev.text, all_preds):
         if pred.item() == 1:
             result_chars.append(ch.upper())
         else:
@@ -174,18 +173,10 @@ def main(args: argparse.Namespace) -> None:
     # as input, capitalize suitable characters, and write the result to `predictions_file`
     # (which is by default `uppercase_test.txt` in the `args.logdir` directory).
     os.makedirs(args.logdir, exist_ok=True)
-<<<<<<< HEAD
-    with open(os.path.join(args.logdir, "uppercase_test.txt"), "w", encoding="utf-8") as predictions_file:
-        # Get the test set predictions; if you modified the `test` dataloader or your model
-        # does not process the dataset windows, you might need to adjust the following line.
-        predictions = model.predict(test, data_with_labels=True)
-        ...
-=======
     predictions_path = os.path.join(args.logdir, "uppercase_test.txt")
     with open(predictions_path, "w", encoding="utf-8") as predictions_file:
         predictions_file.write(result_text)
     print(f"Predictions written to {predictions_path}")
->>>>>>> fe62c8e (Lab 03)
 
 
 if __name__ == "__main__":
