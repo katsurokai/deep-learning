@@ -16,57 +16,54 @@ from npfl138.datasets.cifar10 import CIFAR10
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--batch_size", default=128, type=int, help="Batch size.")
-parser.add_argument("--epochs", default=49, type=int, help="Number of epochs.")
+parser.add_argument("--epochs", default=20, type=int, help="Number of epochs.")
 parser.add_argument("--seed", default=42, type=int, help="Random seed.")
 parser.add_argument("--threads", default=0, type=int, help="Maximum number of threads to use.")
-parser.add_argument("--decay", default=0.0005, type=float, help="Weight decay.")
-parser.add_argument("--lr", default=0.01, type=float, help="Learning Rate.")
 
-def make_layers(cfg, batch_norm=True):
-    layers = []
-    in_channels = 3
-    for v in cfg:
-        if v == 'M':
-            layers.append(nn.MaxPool2d(kernel_size=2, stride=2))
-        else:
-            conv2d = nn.Conv2d(in_channels, v, kernel_size=3, padding=1)
-            if batch_norm:
-                layers += [conv2d, nn.BatchNorm2d(v), nn.ReLU(inplace=True)]
-            else:
-                layers += [conv2d, nn.ReLU(inplace=True)]
-            in_channels = v
-    return nn.Sequential(*layers)
-
-class VGG(nn.Module):
-    def __init__(self, features, num_classes=10, init_weights=True):
-        super(VGG, self).__init__()
-        self.features = features
-        # For CIFAR10 with input size 32x32 and 4 pooling layers:
-        # 32 -> 16 -> 8 -> 4 -> 2 so the feature map is 512 x 2 x 2.
-        self.classifier = nn.Sequential(
-            nn.Linear(512 * 2 * 2, 512),
-            nn.ReLU(True),
-            nn.Dropout(0.1),
-            nn.Linear(512, num_classes),
-        )
-        if init_weights:
-            self._initialize_weights()
-            
+# Define a simple CNN model.
+class CNN(nn.Module):
+    def __init__(self, kernel_size=3, padding=1):
+        super(CNN, self).__init__()
+        # First block: two conv layers followed by max pooling.
+        self.conv1 = nn.Conv2d(3, 64, kernel_size=kernel_size, padding=padding)
+        self.bn1 = nn.BatchNorm2d(64)
+        self.conv2 = nn.Conv2d(64, 64, kernel_size=kernel_size, padding=padding)
+        self.bn2 = nn.BatchNorm2d(64)
+        self.pool = nn.MaxPool2d(2, 2)
+        # Second block: two conv layers with increased channels.
+        self.conv3 = nn.Conv2d(64, 128, kernel_size=kernel_size, padding=padding)
+        self.bn3 = nn.BatchNorm2d(128)
+        self.conv4 = nn.Conv2d(128, 128, kernel_size=kernel_size, padding=padding)
+        self.bn4 = nn.BatchNorm2d(128)
+        # Fully connected layers.
+        self.fc1 = nn.Linear(128 * 8 * 8, 256)
+        self.fc2 = nn.Linear(256, 10)
+        self.dropout = nn.Dropout(0.5)
+        
     def forward(self, x):
-        x = self.features(x)
-        x = torch.flatten(x, 1)
-        x = self.classifier(x)
+        x = F.relu(self.bn1(self.conv1(x)))
+        x = F.relu(self.bn2(self.conv2(x)))
+        x = self.pool(x)
+        x = F.relu(self.bn3(self.conv3(x)))
+        x = F.relu(self.bn4(self.conv4(x)))
+        x = self.pool(x)
+        x = x.view(x.size(0), -1)
+        x = F.relu(self.fc1(x))
+        x = self.dropout(x)
+        x = self.fc2(x)
         return x
 
+    # Predict method to yield outputs (one per example) from a given dataloader.
     def predict(self, dataloader):
         self.eval()
         predictions = []
         with torch.no_grad():
             for batch in dataloader:
                 images = batch["image"]
+                # Convert to tensor if necessary.
                 if not torch.is_tensor(images):
                     images = torch.tensor(images)
-                # Rearrange if images are (N, H, W, C).
+                # If images come as (N, H, W, C), rearrange to (N, C, H, W).
                 if images.ndim == 4 and images.shape[-1] == 3:
                     images = images.permute(0, 3, 1, 2)
                 images = images.float() / 255.0
@@ -76,24 +73,8 @@ class VGG(nn.Module):
                     predictions.append(output.cpu().numpy())
         return predictions
 
-    def _initialize_weights(self):
-        for m in self.modules():
-            if isinstance(m, nn.Conv2d):
-                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
-                if m.bias is not None:
-                    nn.init.constant_(m.bias, 0)
-            elif isinstance(m, nn.BatchNorm2d):
-                nn.init.constant_(m.weight, 1)
-                nn.init.constant_(m.bias, 0)
-            elif isinstance(m, nn.Linear):
-                nn.init.normal_(m.weight, 0, 0.01)
-                nn.init.constant_(m.bias, 0)
-
-# VGG16 configuration adapted for CIFAR10 (using 4 pooling layers).
-cfg_vgg16_cifar = [64, 64, 'M', 128, 128, 'M', 256, 256, 256, 'M', 512, 512, 512, 'M']
-
 def main(args: argparse.Namespace) -> None:
-    # Set random seed and thread options.
+    # Set the random seed and number of threads.
     npfl138.startup(args.seed, args.threads)
     npfl138.global_keras_initializers()
 
@@ -105,29 +86,34 @@ def main(args: argparse.Namespace) -> None:
                   for k, v in sorted(vars(args).items())))
     ))
 
-    # Load the CIFAR10 dataset.
+    # Load the data.
     cifar = CIFAR10()
+    
+    # Use the CIFAR10 dataset objects directly with DataLoader.
     train_loader = torch.utils.data.DataLoader(cifar.train, batch_size=args.batch_size, shuffle=True)
     dev_loader = torch.utils.data.DataLoader(cifar.dev, batch_size=args.batch_size, shuffle=False)
     test_loader = torch.utils.data.DataLoader(cifar.test, batch_size=args.batch_size, shuffle=False)
 
-    # Create the model and move it to the GPU.
+    # Create the model and move it to the appropriate device.
     device = torch.device("cuda")
-    model = VGG(make_layers(cfg_vgg16_cifar, batch_norm=True)).to(device)
+    model = CNN().to(device)
 
     # Define loss function and optimizer.
+    # criterion = nn.CrossEntropyLoss()
     criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
-    optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.decay)
+    optimizer = optim.AdamW(model.parameters(), lr=0.0001, weight_decay=0.0001)
 
     # Training loop.
     for epoch in range(args.epochs):
         model.train()
         running_loss = 0.0
         for batch in train_loader:
+            # Each batch is assumed to be a dict with keys "image" and "label".
             images = batch["image"]
             labels = batch["label"]
             if not torch.is_tensor(images):
                 images = torch.tensor(images)
+            # Rearrange images if needed.
             if images.ndim == 4 and images.shape[-1] == 3:
                 images = images.permute(0, 3, 1, 2)
             images = images.float() / 255.0
@@ -142,7 +128,7 @@ def main(args: argparse.Namespace) -> None:
         avg_loss = running_loss / len(cifar.train)
         print(f"Epoch {epoch+1}/{args.epochs}, Loss: {avg_loss:.4f}")
 
-        # Evaluate on the development set.
+        # Evaluate on the dev set.
         model.eval()
         correct = 0
         total = 0
@@ -167,6 +153,7 @@ def main(args: argparse.Namespace) -> None:
     os.makedirs(args.logdir, exist_ok=True)
     with open(os.path.join(args.logdir, "cifar_competition_test.txt"), "w", encoding="utf-8") as predictions_file:
         for prediction in model.predict(test_loader):
+            # Write the predicted class (using argmax on raw logits).
             predictions_file.write(f"{int(np.argmax(prediction))}\n")
 
 if __name__ == "__main__":

@@ -13,7 +13,7 @@ from npfl138.datasets.mnist import MNIST
 
 parser = argparse.ArgumentParser()
 # These arguments will be set appropriately by ReCodEx, even if you change them.
-parser.add_argument("--batch_size", default=50, type=int, help="Batch size.")
+parser.add_argument("--batch_size", default=10000, type=int, help="Batch size.")
 parser.add_argument("--cnn", default=None, type=str, help="CNN architecture.")
 parser.add_argument("--epochs", default=10, type=int, help="Number of epochs.")
 parser.add_argument("--recodex", default=False, action="store_true", help="Evaluation in ReCodEx.")
@@ -32,6 +32,7 @@ class Dataset(npfl138.TransformedDataset):
 
 class Model(npfl138.TrainableModule):
     def __init__(self, args: argparse.Namespace) -> None:
+        super().__init__()
         # TODO: Add CNN layers specified by `args.cnn`, which contains
         # a comma-separated list of the following layers:
         # - `C-filters-kernel_size-stride-padding`: Add a convolutional layer with ReLU
@@ -69,7 +70,101 @@ class Model(npfl138.TrainableModule):
         # where the `self.eval()` is necessary to avoid the batchnorms to update their running statistics.
 
         # TODO: Finally, add the final Linear output layer with `MNIST.LABELS` units.
-        ...
+
+        # Use a default architecture if none is provided.
+        cnn_string = args.cnn if args.cnn is not None else "C-32-3-1-1,F,H-100"
+        # Split on commas that are not inside square brackets.
+        tokens = re.split(r',(?![^\[]*\])', cnn_string)
+        layers = []
+
+        # Helper function to create a convolutional layer.
+        def create_conv_layer(token: str, use_bn: bool) -> torch.nn.Module:
+            parts = token.split("-")
+            filters = int(parts[1])
+            kernel_size = int(parts[2])
+            stride = int(parts[3])
+            if parts[4].lower() == "valid":
+                padding = 0
+            elif parts[4].lower() == "same":
+                padding = "same"  # Use string padding for "same"
+            else:
+                padding = int(parts[4])
+            if use_bn:
+                return torch.nn.Sequential(
+                    torch.nn.LazyConv2d(filters, kernel_size=kernel_size, stride=stride, padding=padding, bias=False),
+                    torch.nn.LazyBatchNorm2d(),
+                    torch.nn.ReLU()
+                )
+            else:
+                return torch.nn.Sequential(
+                    torch.nn.LazyConv2d(filters, kernel_size=kernel_size, stride=stride, padding=padding, bias=True),
+                    torch.nn.ReLU()
+                )
+
+        # Process each token in the architecture specification.
+        for token in tokens:
+            token = token.strip()
+            if token.startswith("C-"):
+                layers.append(create_conv_layer(token, use_bn=False))
+            elif token.startswith("CB-"):
+                layers.append(create_conv_layer(token, use_bn=True))
+            elif token.startswith("M-"):
+                # Format: M-pool_size-stride.
+                parts = token.split("-")
+                pool_size = int(parts[1])
+                stride = int(parts[2])
+                layers.append(torch.nn.MaxPool2d(kernel_size=pool_size, stride=stride, padding=0))
+            elif token == "F":
+                layers.append(torch.nn.Flatten())
+            elif token.startswith("H-"):
+                # Format: H-hidden_layer_size.
+                parts = token.split("-")
+                hidden_size = int(parts[1])
+                layers.append(torch.nn.Sequential(
+                    torch.nn.LazyLinear(hidden_size),
+                    torch.nn.ReLU()
+                ))
+            elif token.startswith("D-"):
+                # Format: D-dropout_rate.
+                parts = token.split("-")
+                dropout_rate = float(parts[1])
+                layers.append(torch.nn.Dropout(dropout_rate))
+            elif token.startswith("R-[") and token.endswith("]"):
+                # Residual block: extract inner layers specification.
+                inner_spec = token[3:-1]
+                inner_tokens = re.split(r',(?![^\[]*\])', inner_spec)
+                inner_layers = []
+                for it in inner_tokens:
+                    it = it.strip()
+                    if it.startswith("C-") or it.startswith("CB-"):
+                        inner_layers.append(create_conv_layer(it, use_bn=it.startswith("CB-")))
+                    else:
+                        raise ValueError("Residual block may only contain convolutional layers, got: " + it)
+                inner_block = torch.nn.Sequential(*inner_layers)
+
+                # Define a residual module that adds its input to the block's output.
+                class Residual(torch.nn.Module):
+                    def __init__(self, block: torch.nn.Module) -> None:
+                        super().__init__()
+                        self.block = block
+                    def forward(self, x: torch.Tensor) -> torch.Tensor:
+                        return x + self.block(x)
+                layers.append(Residual(inner_block))
+            else:
+                raise ValueError("Unknown layer specification: " + token)
+
+        # Finally, add the final linear layer with MNIST.LABELS outputs.
+        layers.append(torch.nn.LazyLinear(MNIST.LABELS))
+        self.net = torch.nn.Sequential(*layers)
+
+        # Perform a dummy forward pass to initialize all lazy layers.
+        self.eval()
+        with torch.no_grad():
+            self.net(torch.zeros(1, MNIST.C, MNIST.H, MNIST.W))
+        self.train()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.net(x)
 
 
 def main(args: argparse.Namespace) -> dict[str, float]:

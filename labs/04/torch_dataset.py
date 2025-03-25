@@ -34,7 +34,7 @@ class ManualDataset(torch.utils.data.Dataset):
 
     def __len__(self) -> int:
         # TODO: Return the length of the dataset; you can use `len` on the `self._dataset`.
-        ...
+        return len(self._dataset)
 
     def __getitem__(self, index: int) -> tuple[torch.Tensor, torch.Tensor]:
         # TODO: Start by indexing the `self._dataset` with `index` to get
@@ -43,7 +43,12 @@ class ManualDataset(torch.utils.data.Dataset):
         # - the original image needs to be converted to `torch.float32`, divided
         #   by 255, and passed through `self._augmentation_fn` if it is not `None`;
         # - the label is passed unchanged.
-        ...
+        data = self._dataset[index]
+        image = data["image"].to(torch.float32) / 255
+        if self._augmentation_fn is not None:
+            image = self._augmentation_fn(image)
+        
+        return image, data["label"]
 
 
 # We can also make our life slightly easier by using the `npfl138.TransformedDataset`.
@@ -57,7 +62,10 @@ class TransformedDataset(npfl138.TransformedDataset):
         # dataset; you now only need to process it as in the `ManualDataset`, so
         # (1) convert to `torch.float32`, (2) divide by 255, and (3) apply the
         # `self._augmentation_fn` if it is not `None`; finally, return (image, label) pair.
-        ...
+        image = example["image"].to(torch.float32) / 255
+        if self._augmentation_fn is not None:
+            image = self._augmentation_fn(image)
+        return image, example["label"]
 
     # Furthermore, we could also define a batch-wise transformation function
     #   def transform_batch(self, batch: tuple[torch.Tensor, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
@@ -111,7 +119,10 @@ def main(args: argparse.Namespace) -> dict[str, float]:
             # - then add `v2.RandomCrop` that chooses a random crop of size 32x32,
             # - and finally add `v2.RandomHorizontalFlip` that uniformly
             #   randomly flips the image horizontally.
-            ...
+            v2.RandomResize(28,36),
+            v2.Pad(4),
+            v2.RandomCrop((32,32)),
+            v2.RandomHorizontalFlip()
         ])
     else:
         augmentation_fn = None
