@@ -58,12 +58,19 @@ class Convolution:
 
         for i in range(k):
             for j in range(k):
+                # Extract the sliding window (patch) from inputs.
                 patch = inputs[:, i: i + s * out_h: s, j: j + s * out_w: s, :]
+                # patch shape: [batch, out_h, out_w, in_channels]
+                # Get the corresponding kernel slice (shape: [in_channels, filters]).
                 kernel_slice = self._kernel[i, j, :, :]
+                # Compute the dot product over the channel dimension.
                 output += torch.einsum('bxyc,cf->bxyf', patch, kernel_slice)
+        # Add bias (broadcasted over spatial dimensions).
         output += self._bias
+        # Apply ReLU activation.
         output = torch.relu(output)
 
+        # If requested, verify that `output` contains a correct value.
         if self._verify:
             reference = torch.relu(torch.nn.functional.conv2d(
                 inputs.movedim(-1, 1), self._kernel.permute(3, 2, 0, 1), self._bias, self._stride)).movedim(1, -1)
@@ -82,8 +89,12 @@ class Convolution:
         # - `self._kernel`,
         # - `self._bias`.
 
+        # Compute the gradient with respect to the activation (ReLU derivative).
+        # Since outputs is after ReLU, the derivative is 0 when outputs == 0.
         relu_mask = (outputs > 0).to(outputs_gradient.dtype)
         d_out = outputs_gradient * relu_mask
+
+        # Bias gradient: sum the (masked) gradient over batch and spatial dimensions.
         bias_gradient = d_out.sum(dim=(0, 1, 2))
 
         batch, in_h, in_w, in_channels = inputs.shape
@@ -91,13 +102,18 @@ class Convolution:
         k = self._kernel_size
         s = self._stride
 
+        # Initialize gradients for the kernel and inputs.
         kernel_gradient = torch.zeros_like(self._kernel)
         inputs_gradient = torch.zeros_like(inputs)
 
+        # For each kernel element, accumulate gradients.
         for i in range(k):
             for j in range(k):
+                # Extract the corresponding patch from the inputs.
                 patch = inputs[:, i: i + s * out_h: s, j: j + s * out_w: s, :]
+                # Kernel gradient: sum over batch and spatial dimensions.
                 kernel_gradient[i, j] = torch.einsum('bxyc,bxyf->cf', patch, d_out)
+                # Input gradient: scatter the gradient back to the input.
                 inputs_gradient[:, i: i + s * out_h: s, j: j + s * out_w: s, :] += torch.einsum('bxyf,cf->bxyc', d_out, self._kernel[i, j])
         
         # If requested, verify that the three computed gradients are correct.
