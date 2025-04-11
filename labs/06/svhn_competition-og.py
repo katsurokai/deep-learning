@@ -12,7 +12,6 @@ import torch.nn.functional as F
 import torchvision
 import torchvision.transforms.v2 as v2
 import torchvision.transforms.functional as TF
-from torch.utils.data import Subset
 
 import bboxes_utils
 import npfl138
@@ -29,14 +28,6 @@ parser.add_argument("--seed", default=42, type=int, help="Random seed.")
 parser.add_argument("--threads", default=0, type=int, help="Maximum number of threads to use.")
 parser.add_argument("--lr", default=1e-4, type=float, help="Learning rate.")
 parser.add_argument("--weight_decay", default=1e-5, type=float, help="Weight decay.")
-
-# Augmentation flags.
-parser.add_argument("--flip", action="store_true", default=False,
-                    help="Enable random horizontal flip augmentation.")
-parser.add_argument("--rotate", action="store_true", default=False,
-                    help="Enable random rotation augmentation.")
-parser.add_argument("--color_jitter", action="store_true", default=False,
-                    help="Enable color jitter augmentation.")
 
 # --- Modified Detection Head using a conv tower and focal loss ---
 class DetectionHead(nn.Module):
@@ -69,29 +60,13 @@ class DetectionHead(nn.Module):
         bbox_reg = self.reg_head(reg_features)
         return cls_logits, bbox_reg
 
-def train_transform(sample, args):
+def train_transform(sample):
     original_size = sample["image"].shape[1:]  # (H, W)
     new_size = (224, 224)
     # Resize image.
     image = TF.resize(sample["image"], new_size)
     # Convert image to float in [0,1].
     image = image.to(torch.float32).div(255.0)
-
-    # Clone original bounding boxes.
-    bboxes = sample["bboxes"].float().clone()
-
-    # Color Jitter.
-    if args.color_jitter:
-        brightness_factor = 1 + (torch.rand(1).item() - 0.5) * 0.4  # ±20%
-        contrast_factor   = 1 + (torch.rand(1).item() - 0.5) * 0.4
-        saturation_factor = 1 + (torch.rand(1).item() - 0.5) * 0.4
-        hue_factor        = (torch.rand(1).item() - 0.5) * 0.2         # ±0.1
-
-        image = torchvision.transforms.functional.adjust_brightness(image, brightness_factor)
-        image = torchvision.transforms.functional.adjust_contrast(image, contrast_factor)
-        image = torchvision.transforms.functional.adjust_saturation(image, saturation_factor)
-        image = torchvision.transforms.functional.adjust_hue(image, hue_factor)
-
     # Normalize the image.
     mean = [0.5, 0.5, 0.5]
     std = [0.5, 0.5, 0.5]
@@ -100,7 +75,7 @@ def train_transform(sample, args):
     # Adjust bounding boxes.
     scale_y = new_size[0] / original_size[0]
     scale_x = new_size[1] / original_size[1]
-    # bboxes = sample["bboxes"].float().clone()
+    bboxes = sample["bboxes"].float().clone()
     bboxes[:, [0, 2]] *= scale_y  # adjust top and bottom
     bboxes[:, [1, 3]] *= scale_x  # adjust left and right
     return image, (sample["classes"], bboxes)
@@ -203,6 +178,47 @@ class TrainableSVHNDetector(TrainableModule):
             total_loss += loss_cls_weight * loss_cls + loss_reg_weight * loss_reg
         return total_loss / batch_size
 
+    # def predict(self, dataset, preprocessing, device):
+    #     """
+    #     Predict on a dataset and return a dictionary with:
+    #       - 'class_output': a list of 1D numpy arrays containing the predicted digits.
+    #       - 'bboxes_output': a list of [N, 4] numpy arrays with bounding boxes.
+    #     """
+    #     self.eval()
+    #     all_class_outputs = []
+    #     all_bboxes_outputs = []
+    #     with torch.no_grad():
+    #         for example in dataset:
+    #             image = transform(example)
+    #             image_preprocessed = preprocessing(image).unsqueeze(0).to(device)
+    #             cls_logits, bbox_reg, anchors = self(image_preprocessed)
+    #             cls_probs = torch.sigmoid(cls_logits)[0]
+    #             scores, labels = torch.max(cls_probs, dim=-1)
+    #             decoded_boxes = bboxes_utils.bboxes_from_rcnn(anchors, bbox_reg[0])
+    #             keep = scores > 0.5
+    #             if keep.sum() == 0:
+    #                 predicted_classes = torch.empty((0,), dtype=torch.long)
+    #                 predicted_bboxes = torch.empty((0, 4), dtype=torch.float32)
+    #             else:
+    #                 boxes = decoded_boxes[keep]
+    #                 kept_labels = labels[keep]
+    #                 kept_scores = scores[keep]
+    #                 final_indices = []
+    #                 # Apply NMS for each unique predicted class.
+    #                 for cls in kept_labels.unique():
+    #                     cls_mask = (kept_labels == cls)
+    #                     cls_boxes = boxes[cls_mask]
+    #                     cls_scores = kept_scores[cls_mask]
+    #                     nms_indices = torchvision.ops.nms(cls_boxes, cls_scores, 0.3)
+    #                     kept_idx = torch.nonzero(cls_mask, as_tuple=False).view(-1)
+    #                     final_indices.append(kept_idx[nms_indices])
+    #                 final_indices = torch.cat(final_indices)
+    #                 predicted_classes = kept_labels[final_indices]
+    #                 predicted_bboxes = boxes[final_indices]
+    #             all_class_outputs.append(predicted_classes.cpu().numpy())
+    #             all_bboxes_outputs.append(predicted_bboxes.cpu().numpy())
+    #     return {'class_output': all_class_outputs, 'bboxes_output': all_bboxes_outputs}
+
 def main(args: argparse.Namespace) -> None:
     npfl138.startup(args.seed, args.threads)
     npfl138.global_keras_initializers()
@@ -216,19 +232,10 @@ def main(args: argparse.Namespace) -> None:
 
     svhn = SVHN(decode_on_demand=False)
 
-    # --- Limit the training set to 10 images ---
-    # indices = list(range(10))
-    # limited_train = Subset(svhn.train, indices)
-
-    # # Wrap the limited training set with TransformedDataset
-    # train_dataset = TransformedDataset(limited_train)
-
     train_dataset = TransformedDataset(svhn.train)
     dev_dataset = TransformedDataset(svhn.dev)
-
-    # Use lambda functions to pass args to the transform.
-    train_dataset.transform = lambda sample: train_transform(sample, args)
-    dev_dataset.transform = lambda sample: train_transform(sample, args)
+    train_dataset.transform = train_transform
+    dev_dataset.transform = train_transform
     train_dataset.collate = custom_collate
     dev_dataset.collate = custom_collate
 
@@ -255,7 +262,8 @@ def main(args: argparse.Namespace) -> None:
 
     os.makedirs(args.logdir, exist_ok=True)
         # Inference on DEV set
-    with open(os.path.join(args.logdir, "svhn_competition.txt"), "w", encoding="utf-8") as f:
+    dev_predictions_file = os.path.join(args.logdir, "svhn_competition_dev.txt")
+    with open(dev_predictions_file, "w", encoding="utf-8") as f:
         model.eval()
         with torch.no_grad():
             for example in svhn.dev:
@@ -265,7 +273,7 @@ def main(args: argparse.Namespace) -> None:
                 cls_probs = torch.sigmoid(cls_logits)[0]
                 scores, labels = torch.max(cls_probs, dim=-1)
                 decoded_boxes = bboxes_utils.bboxes_from_rcnn(anchors, bbox_reg[0])
-                keep = scores > 0.2
+                keep = scores > 0.5
                 if keep.sum() == 0:
                     f.write("\n")
                 else:
@@ -284,23 +292,16 @@ def main(args: argparse.Namespace) -> None:
                     predicted_classes = kept_labels[final_indices]
                     predicted_bboxes = boxes[final_indices]
                     # Rescale predicted bboxes from the network input (224x224) back to the original image size.
-                    # orig_size = example["image"].shape[1]  # assuming square images
-                    # scale_factor = orig_size / 224.0
-                    # predicted_bboxes = predicted_bboxes * scale_factor
-
-                    # rescale 
-                    orig_h, orig_w = example["image"].shape[1:]  # original height and width
-                    scale_y = orig_h / 224.0
-                    scale_x = orig_w / 224.0
-                    predicted_bboxes[:, [0, 2]] *= scale_y  # adjust top and bottom
-                    predicted_bboxes[:, [1, 3]] *= scale_x
+                    orig_size = example["image"].shape[1]  # assuming square images
+                    scale_factor = orig_size / 224.0
+                    predicted_bboxes = predicted_bboxes * scale_factor
                     output = []
                     for pcls, bbox in zip(predicted_classes.tolist(), predicted_bboxes.tolist()):
                         output += [int(pcls)] + [float(x) for x in bbox]
                     f.write(" ".join(map(str, output)) + "\n")
 
     # --- Evaluate the dev predictions ---
-    with open(os.path.join(args.logdir, "svhn_competition.txt"), "r", encoding="utf-8-sig") as f:
+    with open(dev_predictions_file, "r", encoding="utf-8-sig") as f:
         dev_accuracy = SVHN.evaluate_file(svhn.dev, f)
     print("Dev set accuracy: {:.2f}%".format(dev_accuracy))
 

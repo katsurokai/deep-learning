@@ -1,174 +1,142 @@
-# This file is part of NPFL138 <http://github.com/ufal/npfl138/>.
-#
-# This Source Code Form is subject to the terms of the Mozilla Public
-# License, v. 2.0. If a copy of the MPL was not distributed with this
-# file, You can obtain one at http://mozilla.org/MPL/2.0/.
+import argparse
+import datetime
 import os
-import sys
-from typing import Any, Sequence, TextIO, TypedDict
-import urllib.request
+import re
 
+import numpy as np
+import timm
 import torch
-import torchvision
+import torchvision.transforms.v2 as v2
+from torch.utils.data import DataLoader, Dataset
+import torchvision.transforms.functional as TF
 
-from .tfrecord_dataset import TFRecordDataset
+import bboxes_utils
+import npfl138
+npfl138.require_version("2425.6.1")
+from npfl138.datasets.svhn import SVHN
 
+parser = argparse.ArgumentParser()
+parser.add_argument("--batch_size", default=64, type=int, help="Batch size.")
+parser.add_argument("--epochs", default=10, type=int, help="Number of epochs.")
+parser.add_argument("--seed", default=42, type=int, help="Random seed.")
+parser.add_argument("--threads", default=0, type=int, help="Maximum number of threads to use.")
 
-class SVHN:
-    LABELS: int = 10
+class SVHNWrapper(Dataset):
+    def __init__(self, data, transform=None):
+        self.data = data
+        self.transform = transform
 
-    # Type alias for a bounding box -- a list of floats.
-    BBox = list[float]
+    def __len__(self):
+        return len(self.data)
 
-    # The indices of the bounding box coordinates.
-    TOP: int = 0
-    LEFT: int = 1
-    BOTTOM: int = 2
-    RIGHT: int = 3
+    def __getitem__(self, index):
+        sample = self.data[index]
+        image = TF.resize(sample["image"], [224, 224])
+        if self.transform:
+            image = self.transform(image)
+        labels = sample["classes"].clone().detach().long()
+        bboxes = sample["bboxes"].clone().detach().float()
+        return image, labels, bboxes
 
-    Element = TypedDict("Element", {"image": torch.Tensor, "classes": torch.Tensor, "bboxes": torch.Tensor})
+def main(args: argparse.Namespace) -> None:
+    npfl138.startup(args.seed, args.threads)
+    npfl138.global_keras_initializers()
 
-    _URL: str = "https://ufal.mff.cuni.cz/~straka/courses/npfl138/2425/datasets/"
+    args.logdir = os.path.join("logs", "{}-{}-{}".format(
+        os.path.basename(globals().get("__file__", "notebook")),
+        datetime.datetime.now().strftime("%Y-%m-%d_%H%M%S"),
+        ",".join(("{}={}".format(re.sub("(.)[^_]*_?", r"\1", k), v) for k, v in sorted(vars(args).items())))
+    ))
 
-    class Dataset(TFRecordDataset):
-        def __init__(self, path: str, size: int, decode_on_demand: bool) -> None:
-            super().__init__(path, size, decode_on_demand)
+    svhn = SVHN(decode_on_demand=False)
 
-        def __len__(self) -> int:
-            return super().__len__()
+    efficientnetv2_b0 = timm.create_model("tf_efficientnetv2_b0.in1k", pretrained=True, num_classes=0, features_only=True)
+    feature_channels = efficientnetv2_b0.feature_info.channels()[-1]
 
-        def __getitem__(self, index: int) -> "SVHN.Element":
-            return super().__getitem__(index)
+    class FeatureExtractor(torch.nn.Module):
+        def __init__(self, base):
+            super().__init__()
+            self.base = base
 
-        def _tfrecord_decode(self, data: dict, indices: dict, index: int) -> "SVHN.Element":
-            return {
-                "image": torchvision.io.decode_image(
-                    data["image"][indices["image"][index]:indices["image"][index + 1]],
-                    torchvision.io.ImageReadMode.RGB),
-                "classes": data["classes"][indices["classes"][index]:indices["classes"][index + 1]],
-                "bboxes": data["bboxes"][indices["bboxes"][index]:indices["bboxes"][index + 1]].view(-1, 4),
-            }
+        def forward(self, x):
+            feats = self.base(x)[-1]
+            return feats
 
-    def __init__(self, decode_on_demand: bool = False) -> None:
-        for dataset, size in [("train", 10_000), ("dev", 1_267), ("test", 4_535)]:
-            path = "svhn.{}.tfrecord".format(dataset)
-            if not os.path.exists(path):
-                print("Downloading file {}...".format(path), file=sys.stderr)
-                urllib.request.urlretrieve("{}/{}".format(self._URL, path), filename="{}.tmp".format(path))
-                os.rename("{}.tmp".format(path), path)
+    backbone = FeatureExtractor(efficientnetv2_b0)
 
-            setattr(self, dataset, self.Dataset(path, size, decode_on_demand))
+    preprocessing = v2.Compose([
+        v2.ToDtype(torch.float32, scale=True),
+        v2.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+    ])
 
-    train: Dataset
-    dev: Dataset
-    test: Dataset
+    class SVHNModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.backbone = backbone
+            self.classifier = torch.nn.Sequential(
+                torch.nn.AdaptiveAvgPool2d(1),
+                torch.nn.Flatten(),
+                torch.nn.Linear(feature_channels, 10)
+            )
+            self.bbox_regressor = torch.nn.Sequential(
+                torch.nn.AdaptiveAvgPool2d(1),
+                torch.nn.Flatten(),
+                torch.nn.Linear(feature_channels, 4)
+            )
 
-    # Evaluation infrastructure.
-    @staticmethod
-    def evaluate(
-        gold_dataset: Dataset, predictions: Sequence[tuple[list[int], list[BBox]]], iou_threshold: float = 0.5,
-    ) -> float:
-        def bbox_iou(x: SVHN.BBox, y: SVHN.BBox) -> float:
-            def area(bbox: SVHN.BBox) -> float:
-                return max(bbox[SVHN.BOTTOM] - bbox[SVHN.TOP], 0) * max(bbox[SVHN.RIGHT] - bbox[SVHN.LEFT], 0)
-            intersection = [max(x[SVHN.TOP], y[SVHN.TOP]), max(x[SVHN.LEFT], y[SVHN.LEFT]),
-                            min(x[SVHN.BOTTOM], y[SVHN.BOTTOM]), min(x[SVHN.RIGHT], y[SVHN.RIGHT])]
-            x_area, y_area, intersection_area = area(x), area(y), area(intersection)
-            return intersection_area / (x_area + y_area - intersection_area)
+        def forward(self, x):
+            features = self.backbone(x)
+            class_logits = self.classifier(features)
+            bbox_coords = self.bbox_regressor(features)
+            return class_logits, bbox_coords
 
-        gold = [(example["classes"].numpy(), example["bboxes"].numpy()) for example in gold_dataset]
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = SVHNModel().to(device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
+    loss_class = torch.nn.CrossEntropyLoss()
+    loss_bbox = torch.nn.MSELoss()
 
-        if len(predictions) != len(gold):
-            raise RuntimeError("The predictions are of different size than gold data: {} vs {}".format(
-                len(predictions), len(gold)))
+    train_dataset = SVHNWrapper(svhn.train, transform=preprocessing)
+    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
 
-        correct = 0
-        for (gold_classes, gold_bboxes), (prediction_classes, prediction_bboxes) in zip(gold, predictions):
-            if len(gold_classes) != len(prediction_classes):
-                continue
+    test_dataset = SVHNWrapper(svhn.test, transform=preprocessing)
+    test_loader = DataLoader(test_dataset, batch_size=args.batch_size)
 
-            used = [False] * len(gold_classes)
-            for cls, bbox in zip(prediction_classes, prediction_bboxes):
-                best, best_iou = None, None
-                for i in range(len(gold_classes)):
-                    if used[i] or gold_classes[i] != cls:
-                        continue
-                    iou = bbox_iou(bbox, gold_bboxes[i])
-                    if iou >= iou_threshold and (best is None or iou > best_iou):
-                        best, best_iou = i, iou
-                if best is None:
-                    break
-                used[best] = True
-            correct += all(used)
+    for epoch in range(args.epochs):
+        model.train()
+        for images, labels, bboxes in train_loader:
+            images = images.to(device)
+            bboxes = bboxes[:, 0].to(device)  # Use bbox for first digit only
+            label = labels[:, 0].to(device)   # Use label for first digit only
 
-        return 100 * correct / len(gold)
+            pred_class, pred_bbox = model(images)
+            loss = loss_class(pred_class, label) + loss_bbox(pred_bbox, bboxes)
 
-    @staticmethod
-    def evaluate_file(gold_dataset: Dataset, predictions_file: TextIO) -> float:
-        predictions = []
-        for line in predictions_file:
-            values = line.split()
-            if len(values) % 5:
-                raise RuntimeError("Each prediction must contain multiple of 5 numbers, found {}".format(len(values)))
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
 
-            predictions.append(([], []))
-            for i in range(0, len(values), 5):
-                predictions[-1][0].append(int(values[i]))
-                predictions[-1][1].append([float(value) for value in values[i + 1:i + 5]])
+    model.eval()
+    os.makedirs(args.logdir, exist_ok=True)
+    predictions = []
+    with open(os.path.join(args.logdir, "svhn_competition.txt"), "w", encoding="utf-8") as predictions_file:
+        with torch.no_grad():
+            for images, labels, bboxes in test_loader:
+                images = images.to(device)
+                batch_size = images.shape[0]
+                pred_class, pred_bbox = model(images)
 
-        return SVHN.evaluate(gold_dataset, predictions)
+                pred_labels = torch.argmax(pred_class, dim=1).cpu().numpy()
+                pred_bboxes = pred_bbox.cpu().numpy()
 
-    # Visualization infrastructure.
-    @staticmethod
-    def visualize(image: torch.Tensor, labels: list[Any], bboxes: list[BBox], show: bool):
-        """Visualize the given image plus recognized objects.
+                for i in range(batch_size):
+                    output = [int(pred_labels[i])] + list(map(float, pred_bboxes[i]))
+                    print(*output, file=predictions_file)
+                    predictions.append(([int(pred_labels[i])], [pred_bboxes[i].tolist()]))
 
-        Parameters:
-            image: a torch.Tensor of shape [C, H, W] with dtype torch.uint8
-            labels: a list of labels to be shown using the `str` method
-            bboxes: a list of `BBox`es (fourtuples TOP, LEFT, BOTTOM, RIGHT)
-            show: controls whether to show the figure or return it:
-              if `True`, the figure is shown using `plt.show()`;
-              if `False`, the `plt.Figure` instance is returned; it can be saved
-              to TensorBoard using a the `add_figure` method of a `SummaryWriter`.
-        """
-        import matplotlib.pyplot as plt
-
-        figure = plt.figure(figsize=(5, 5))
-        plt.axis("off")
-        plt.imshow(image.movedim(0, -1).numpy(force=True))
-        for label, (top, left, bottom, right) in zip(labels, bboxes):
-            label = label.tolist() if isinstance(label, torch.Tensor) else label
-            plt.gca().add_patch(plt.Rectangle(
-                [left, top], right - left, bottom - top, fill=False, edgecolor=[1, 0, 1], linewidth=2))
-            plt.gca().text(left, top, str(label), bbox={"facecolor": [1, 0, 1], "alpha": 0.5},
-                           clip_box=plt.gca().clipbox, clip_on=True, ha="left", va="top")
-
-        if show:
-            plt.show()
-        else:
-            return figure
-
+    acc = SVHN.evaluate(svhn.test, predictions)
+    print(f"Test accuracy (IoU >= 0.5): {acc:.2f}%")
 
 if __name__ == "__main__":
-    import argparse
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--dataset", default="dev", type=str, help="Gold dataset to evaluate")
-    parser.add_argument("--evaluate", default=None, type=str, help="Prediction file to evaluate")
-    parser.add_argument("--visualize", default=None, type=str, help="Prediction file to visualize")
-    args = parser.parse_args()
-
-    if args.evaluate:
-        with open(args.evaluate, "r", encoding="utf-8-sig") as predictions_file:
-            accuracy = SVHN.evaluate_file(getattr(SVHN(decode_on_demand=True), args.dataset), predictions_file)
-        print("SVHN accuracy: {:.2f}%".format(accuracy))
-
-    if args.visualize:
-        with open(args.visualize, "r", encoding="utf-8-sig") as predictions_file:
-            for line, example in zip(predictions_file, getattr(SVHN(decode_on_demand=True), args.dataset)):
-                values = line.split()
-                classes, bboxes = [], []
-                for i in range(0, len(values), 5):
-                    classes.append(values[i])
-                    bboxes.append([float(value) for value in values[i + 1:i + 5]])
-                SVHN.visualize(example["image"], classes, bboxes, show=True)
+    main_args = parser.parse_args([] if "__file__" not in globals() else None)
+    main(main_args)

@@ -17,26 +17,11 @@ RIGHT: int = 3
 
 
 def bboxes_area(bboxes: torch.Tensor) -> torch.Tensor:
-    """Compute area of given set of bboxes.
-
-    Each bbox is parametrized as a four-tuple (top, left, bottom, right).
-
-    If the bboxes.shape is [..., 4], the output shape is bboxes.shape[:-1].
-    """
     return torch.relu(bboxes[..., BOTTOM] - bboxes[..., TOP]) \
         * torch.relu(bboxes[..., RIGHT] - bboxes[..., LEFT])
 
 
 def bboxes_iou(xs: torch.Tensor, ys: torch.Tensor) -> torch.Tensor:
-    """Compute IoU of corresponding pairs from two sets of bboxes `xs` and `ys`.
-
-    Each bbox is parametrized as a four-tuple (top, left, bottom, right).
-
-    Note that broadcasting is supported, so passing inputs with
-    `xs.shape=[num_xs, 1, 4]` and `ys.shape=[1, num_ys, 4]` produces an output with
-    shape `[num_xs, num_ys]`, computing IoU for all pairs of bboxes from `xs` and `ys`.
-    Formally, the output shape is `torch.broadcast_shapes(xs.shape, ys.shape)[:-1]`.
-    """
     intersections = torch.stack([
         torch.maximum(xs[..., TOP], ys[..., TOP]),
         torch.maximum(xs[..., LEFT], ys[..., LEFT]),
@@ -50,77 +35,94 @@ def bboxes_iou(xs: torch.Tensor, ys: torch.Tensor) -> torch.Tensor:
 
 
 def bboxes_to_rcnn(anchors: torch.Tensor, bboxes: torch.Tensor) -> torch.Tensor:
-    """Convert `bboxes` to a R-CNN-like representation relative to `anchors`.
-
-    The `anchors` and `bboxes` are arrays of four-tuples (top, left, bottom, right);
-    you can use the TOP, LEFT, BOTTOM, RIGHT constants as indices of the
-    respective coordinates.
-
-    The resulting representation of a single bbox is a four-tuple with:
-    - (bbox_y_center - anchor_y_center) / anchor_height
-    - (bbox_x_center - anchor_x_center) / anchor_width
-    - log(bbox_height / anchor_height)
-    - log(bbox_width / anchor_width)
-
-    If the `anchors.shape` is `[anchors_len, 4]` and `bboxes.shape` is `[anchors_len, 4]`,
-    the output shape is `[anchors_len, 4]`.
-    """
     # TODO: Implement according to the docstring.
-    raise NotImplementedError()
+    # Compute anchor centers and sizes.
+    anchor_height = anchors[..., BOTTOM] - anchors[..., TOP]
+    anchor_width = anchors[..., RIGHT] - anchors[..., LEFT]
+    anchor_center_y = (anchors[..., TOP] + anchors[..., BOTTOM]) / 2.0
+    anchor_center_x = (anchors[..., LEFT] + anchors[..., RIGHT]) / 2.0
+
+    # Compute bbox centers and sizes.
+    bbox_height = bboxes[..., BOTTOM] - bboxes[..., TOP]
+    bbox_width = bboxes[..., RIGHT] - bboxes[..., LEFT]
+    bbox_center_y = (bboxes[..., TOP] + bboxes[..., BOTTOM]) / 2.0
+    bbox_center_x = (bboxes[..., LEFT] + bboxes[..., RIGHT]) / 2.0
+
+    # Compute the transformation.
+    dy = (bbox_center_y - anchor_center_y) / anchor_height
+    dx = (bbox_center_x - anchor_center_x) / anchor_width
+    dh = torch.log(bbox_height / anchor_height)
+    dw = torch.log(bbox_width / anchor_width)
+
+    return torch.stack((dy, dx, dh, dw), dim=-1)
 
 
 def bboxes_from_rcnn(anchors: torch.Tensor, rcnns: torch.Tensor) -> torch.Tensor:
-    """Convert R-CNN-like representation relative to `anchor` to a `bbox`.
-
-    If the `anchors.shape` is `[anchors_len, 4]` and `rcnns.shape` is `[anchors_len, 4]`,
-    the output shape is `[anchors_len, 4]`.
-    """
     # TODO: Implement according to the docstring.
-    raise NotImplementedError()
+    # Compute anchor centers and sizes.
+    anchor_height = anchors[..., BOTTOM] - anchors[..., TOP]
+    anchor_width = anchors[..., RIGHT] - anchors[..., LEFT]
+    anchor_center_y = (anchors[..., TOP] + anchors[..., BOTTOM]) / 2.0
+    anchor_center_x = (anchors[..., LEFT] + anchors[..., RIGHT]) / 2.0
+
+    # Extract R-CNN deltas.
+    dy = rcnns[..., 0]
+    dx = rcnns[..., 1]
+    dh = rcnns[..., 2]
+    dw = rcnns[..., 3]
+
+    # Recover bbox center and size.
+    bbox_center_y = dy * anchor_height + anchor_center_y
+    bbox_center_x = dx * anchor_width + anchor_center_x
+    bbox_height = torch.exp(dh) * anchor_height
+    bbox_width = torch.exp(dw) * anchor_width
+
+    # Compute bbox coordinates.
+    top = bbox_center_y - bbox_height / 2.0
+    left = bbox_center_x - bbox_width / 2.0
+    bottom = bbox_center_y + bbox_height / 2.0
+    right = bbox_center_x + bbox_width / 2.0
+
+    return torch.stack((top, left, bottom, right), dim=-1)
 
 
 def bboxes_training(
     anchors: torch.Tensor, gold_classes: torch.Tensor, gold_bboxes: torch.Tensor, iou_threshold: float,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Compute training data for object detection.
-
-    Arguments:
-    - `anchors` is an array of four-tuples (top, left, bottom, right)
-    - `gold_classes` is an array of zero-based classes of the gold objects
-    - `gold_bboxes` is an array of four-tuples (top, left, bottom, right)
-      of the gold objects
-    - `iou_threshold` is a given threshold
-
-    Returns:
-    - `anchor_classes` contains for every anchor either 0 for background
-      (if no gold object is assigned) or `1 + gold_class` if a gold object
-      with `gold_class` is assigned to it
-    - `anchor_bboxes` contains for every anchor a four-tuple
-      `(center_y, center_x, height, width)` representing the gold bbox of
-      a chosen object using parametrization of R-CNN; zeros if no gold object
-      was assigned to the anchor
-    If the `anchors` shape is `[anchors_len, 4]`, the `anchor_classes` shape
-    is `[anchors_len]` and the `anchor_bboxes` shape is `[anchors_len, 4]`.
-
-    Algorithm:
-    - First, for each gold object, assign it to an anchor with the largest IoU
-      (the anchor with smaller index if there are several). In case several gold
-      objects are assigned to a single anchor, use the gold object with smaller
-      index.
-    - For each unused anchor, find the gold object with the largest IoU
-      (again the gold object with smaller index if there are several), and if
-      the IoU is >= iou_threshold, assign the object to the anchor.
-    """
     # TODO: First, for each gold object, assign it to an anchor with the
     # largest IoU (the anchor with smaller index if there are several). In case
     # several gold objects are assigned to a single anchor, use the gold object
     # with smaller index.
 
+    num_anchors = anchors.shape[0]
+    num_gold = gold_bboxes.shape[0]
+    assigned_gold = torch.full((num_anchors,), -1, dtype=torch.long)
+
+    # Compute IoU matrix: shape (num_anchors, num_gold)
+    iou_matrix = bboxes_iou(anchors.unsqueeze(1), gold_bboxes.unsqueeze(0))
+
+    for g in range(num_gold):
+        best_anchor = torch.argmax(iou_matrix[:, g]).item()  # smallest index in case of ties
+        if assigned_gold[best_anchor] == -1:
+            assigned_gold[best_anchor] = g
+
     # TODO: For each unused anchor, find the gold object with the largest IoU
     # (again the gold object with smaller index if there are several), and if
     # the IoU is >= threshold, assign the object to the anchor.
 
-    anchor_classes, anchor_bboxes = ..., ...
+    for a in range(num_anchors):
+        if assigned_gold[a] == -1:
+            best_iou, best_gold = torch.max(iou_matrix[a, :], dim=0)
+            if best_iou >= iou_threshold:
+                assigned_gold[a] = best_gold.item()
+
+    anchor_classes, anchor_bboxes = torch.zeros(num_anchors, dtype=torch.long, device="cuda"), torch.zeros((num_anchors, 4), dtype=torch.float32, device="cuda")
+
+    assigned_mask = assigned_gold != -1
+    if assigned_mask.any():
+        gold_idx = assigned_gold[assigned_mask]
+        anchor_classes[assigned_mask] = 1 + gold_classes[gold_idx]
+        anchor_bboxes[assigned_mask] = bboxes_to_rcnn(anchors[assigned_mask], gold_bboxes[gold_idx])
 
     return anchor_classes, anchor_bboxes
 
